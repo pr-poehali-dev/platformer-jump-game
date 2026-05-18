@@ -1,85 +1,177 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 
-const FROG_IMG = "https://cdn.poehali.dev/projects/673a75ca-1f06-45ec-8ca9-0d98d8ce6ab3/files/fac49202-3917-4701-94d4-064553f04ae1.jpg";
-
+// ─── Константы ───────────────────────────────────────────────
 const CANVAS_W = 400;
 const CANVAS_H = 560;
-const GRAVITY = 0.45;
-const JUMP_FORCE = -11;
-const BOOST_FORCE = -18;
-const PLAYER_W = 44;
-const PLAYER_H = 44;
-// Дистанция между платформами по Y (в мировых координатах)
-const PLAT_GAP = 80;
-const PLAT_POOL = 20; // сколько платформ держим в памяти
+const GRAVITY = 0.35;
+const JUMP_FORCE = -8.5;       // замедленный прыжок
+const BOOST_FORCE = -14;
+const PLAYER_W = 40;
+const PLAYER_H = 40;
+const PLAT_GAP = 85;
 
+// ─── Типы ────────────────────────────────────────────────────
 interface Platform {
-  x: number;
-  y: number; // мировые координаты (растут вверх: меньше = выше)
-  w: number;
-  boost: boolean;
-  color: string;
+  x: number; y: number; w: number;
+  boost: boolean; color: string;
+}
+
+type EnemyDir = 1 | -1;
+interface Enemy {
+  x: number; y: number;       // мировые координаты (y = верх врага)
+  w: number; h: number;
+  dir: EnemyDir; speed: number;
+  emoji: string;
+}
+
+type BonusKind = "star" | "shield" | "slow" | "fast" | "shrink" | "magnet";
+interface Bonus {
+  x: number; y: number;
+  kind: BonusKind; collected: boolean;
+}
+
+interface Particle {
+  x: number; y: number; vx: number; vy: number;
+  life: number; maxLife: number; color: string; r: number;
 }
 
 interface GameState {
-  // Позиция игрока в мировых координатах (Y растёт вниз, 0 = верхняя точка мира)
-  playerX: number;
-  playerY: number;
-  velY: number;
-  velX: number;
+  playerX: number; playerY: number;
+  velY: number; velX: number;
   platforms: Platform[];
+  enemies: Enemy[];
+  bonuses: Bonus[];
+  particles: Particle[];
   score: number;
-  // cameraY = мировая Y-координата верхнего края экрана
   cameraY: number;
   alive: boolean;
   facingLeft: boolean;
-  highestY: number; // наивысшая Y-координата игрока (минимальная = самая высокая)
-  nextPlatY: number; // Y следующей платформы для генерации
+  highestY: number;
+  nextPlatY: number;
+  // эффекты
+  shieldTimer: number;    // кадры неуязвимости
+  slowTimer: number;      // замедление гравитации
+  fastTimer: number;      // ускоренное движение
+  magnetTimer: number;    // притяжение бонусов
+  shrinkTimer: number;    // маленький размер
+  invincible: number;     // мигание после удара
+  stars: number;          // собранные звёзды
+  hitCooldown: number;    // кадры после удара
 }
 
-const PLATFORM_COLORS = ["#FF6B6B", "#FFD93D", "#6BCB77", "#4D96FF", "#FF6FD8", "#FF922B"];
-const BOOST_COLOR = "#FFD700";
+// ─── Цвета ───────────────────────────────────────────────────
+const PLAT_COLORS = ["#FF6B6B","#FFD93D","#6BCB77","#4D96FF","#FF6FD8","#FF922B"];
+const BOOST_COLOR  = "#FFD700";
 
+const BONUS_META: Record<BonusKind, { emoji: string; label: string; color: string }> = {
+  star:   { emoji: "⭐", label: "+50 очков",       color: "#FFD93D" },
+  shield: { emoji: "🛡️", label: "Щит 5 сек",       color: "#4D96FF" },
+  slow:   { emoji: "🌀", label: "Лёгкость 4 сек",   color: "#B39DDB" },
+  fast:   { emoji: "🔥", label: "Скорость 4 сек",   color: "#FF922B" },
+  shrink: { emoji: "🔮", label: "Уменьшение 5 сек", color: "#FF6FD8" },
+  magnet: { emoji: "🧲", label: "Магнит 5 сек",     color: "#26C6DA" },
+};
+
+const ENEMY_EMOJIS = ["🦀","👾","🐛","🕷️"];
+
+// ─── Вспомогательные ─────────────────────────────────────────
 function makePlatform(y: number, forceNormal = false): Platform {
-  const boost = !forceNormal && Math.random() < 0.22;
+  const boost = !forceNormal && Math.random() < 0.2;
   return {
     x: Math.random() * (CANVAS_W - 90) + 5,
     y,
-    w: boost ? 58 : 75 + Math.random() * 45,
+    w: boost ? 55 : 70 + Math.random() * 50,
     boost,
-    color: boost ? BOOST_COLOR : PLATFORM_COLORS[Math.floor(Math.random() * PLATFORM_COLORS.length)],
+    color: boost ? BOOST_COLOR : PLAT_COLORS[Math.floor(Math.random() * PLAT_COLORS.length)],
   };
 }
 
+function makeEnemy(y: number): Enemy {
+  return {
+    x: Math.random() * (CANVAS_W - 40),
+    y,
+    w: 36, h: 28,
+    dir: Math.random() < 0.5 ? 1 : -1,
+    speed: 1 + Math.random() * 1.5,
+    emoji: ENEMY_EMOJIS[Math.floor(Math.random() * ENEMY_EMOJIS.length)],
+  };
+}
+
+function makeBonus(y: number): Bonus {
+  const kinds: BonusKind[] = ["star","shield","slow","fast","shrink","magnet"];
+  // взвешенные шансы
+  const weights = [0.4, 0.15, 0.15, 0.15, 0.075, 0.075];
+  const r = Math.random(); let acc = 0; let kind: BonusKind = "star";
+  for (let i = 0; i < kinds.length; i++) { acc += weights[i]; if (r < acc) { kind = kinds[i]; break; } }
+  return { x: Math.random() * (CANVAS_W - 30) + 10, y, kind, collected: false };
+}
+
+function spawnParticles(arr: Particle[], x: number, y: number, color: string, count = 8) {
+  for (let i = 0; i < count; i++) {
+    const angle = (Math.PI * 2 * i) / count + Math.random() * 0.5;
+    const speed = 2 + Math.random() * 3;
+    arr.push({
+      x, y, vx: Math.cos(angle) * speed, vy: Math.sin(angle) * speed,
+      life: 30 + Math.random() * 20, maxLife: 50, color, r: 3 + Math.random() * 4,
+    });
+  }
+}
+
 function initGame(): GameState {
-  // Стартовые платформы: снизу вверх
   const platforms: Platform[] = [];
-  for (let i = 0; i < PLAT_POOL; i++) {
+  for (let i = 0; i < 16; i++) {
     const y = CANVAS_H - 60 - i * PLAT_GAP;
     platforms.push(makePlatform(y, i === 0));
   }
-  // Гарантируем стартовую платформу по центру под лягушонком
   platforms[0] = { x: CANVAS_W / 2 - 50, y: CANVAS_H - 60, w: 100, boost: false, color: "#6BCB77" };
-
   const topPlatY = Math.min(...platforms.map(p => p.y));
 
   return {
     playerX: CANVAS_W / 2 - PLAYER_W / 2,
     playerY: CANVAS_H - 60 - PLAYER_H,
-    velY: 0,
-    velX: 0,
-    platforms,
-    score: 0,
-    cameraY: 0, // верхний край экрана = мировая Y=0
-    alive: true,
-    facingLeft: false,
+    velY: 0, velX: 0,
+    platforms, enemies: [], bonuses: [], particles: [],
+    score: 0, cameraY: 0,
+    alive: true, facingLeft: false,
     highestY: CANVAS_H - 60 - PLAYER_H,
     nextPlatY: topPlatY - PLAT_GAP,
+    shieldTimer: 0, slowTimer: 0, fastTimer: 0, magnetTimer: 0, shrinkTimer: 0,
+    invincible: 0, stars: 0, hitCooldown: 0,
   };
+}
+
+// ─── Рисование лягушонка-эмодзи (без белого фона) ────────────
+function drawFrog(ctx: CanvasRenderingContext2D, x: number, y: number, w: number, h: number, left: boolean, shielded: boolean) {
+  ctx.save();
+  if (shielded) {
+    ctx.shadowColor = "#4D96FF";
+    ctx.shadowBlur = 18;
+  }
+  if (left) {
+    ctx.translate(x + w, y);
+    ctx.scale(-1, 1);
+    ctx.font = `${w}px serif`;
+    ctx.textAlign = "left";
+    ctx.fillText("🐸", 0, h * 0.92);
+  } else {
+    ctx.font = `${w}px serif`;
+    ctx.textAlign = "left";
+    ctx.fillText("🐸", x, y + h * 0.92);
+  }
+  if (shielded) {
+    ctx.shadowBlur = 0;
+    ctx.strokeStyle = "rgba(77,150,255,0.6)";
+    ctx.lineWidth = 3;
+    ctx.beginPath();
+    ctx.ellipse(x + w / 2, y + h / 2, w / 2 + 4, h / 2 + 4, 0, 0, Math.PI * 2);
+    ctx.stroke();
+  }
+  ctx.restore();
 }
 
 type Page = "home" | "game" | "rules" | "leaderboard";
 
+// ─── Компонент ───────────────────────────────────────────────
 export default function Index() {
   const [page, setPage] = useState<Page>("home");
   const [records, setRecords] = useState<number[]>(() => {
@@ -87,16 +179,18 @@ export default function Index() {
   });
   const [finalScore, setFinalScore] = useState(0);
   const [gameRunning, setGameRunning] = useState(false);
-  const canvasRef = useRef<HTMLCanvasElement>(null);
-  const gameRef = useRef<GameState | null>(null);
-  const animRef = useRef<number>(0);
-  const keysRef = useRef<{ left: boolean; right: boolean }>({ left: false, right: false });
-  const frogImgRef = useRef<HTMLImageElement | null>(null);
+  const [activeEffect, setActiveEffect] = useState<string>("");
 
-  useEffect(() => {
-    const img = new Image();
-    img.src = FROG_IMG;
-    img.onload = () => { frogImgRef.current = img; };
+  const canvasRef  = useRef<HTMLCanvasElement>(null);
+  const gameRef    = useRef<GameState | null>(null);
+  const animRef    = useRef<number>(0);
+  const keysRef    = useRef({ left: false, right: false });
+  const effectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const flashEffect = useCallback((label: string) => {
+    setActiveEffect(label);
+    if (effectTimerRef.current) clearTimeout(effectTimerRef.current);
+    effectTimerRef.current = setTimeout(() => setActiveEffect(""), 1800);
   }, []);
 
   const saveRecord = useCallback((score: number) => {
@@ -107,156 +201,268 @@ export default function Index() {
     });
   }, []);
 
+  // ── Отрисовка ──────────────────────────────────────────────
   const drawGame = useCallback(() => {
     const canvas = canvasRef.current;
     const ctx = canvas?.getContext("2d");
     const s = gameRef.current;
     if (!ctx || !s) return;
 
-    // Фон — небо
+    // Небо
     const skyGrad = ctx.createLinearGradient(0, 0, 0, CANVAS_H);
-    skyGrad.addColorStop(0, "#5BBFE8");
-    skyGrad.addColorStop(1, "#D0EEFF");
+    skyGrad.addColorStop(0, "#4BA8D8");
+    skyGrad.addColorStop(1, "#C8E8FF");
     ctx.fillStyle = skyGrad;
     ctx.fillRect(0, 0, CANVAS_W, CANVAS_H);
 
-    // Облака (параллакс — движутся медленнее)
-    ctx.fillStyle = "rgba(255,255,255,0.75)";
-    const cloudSeed = [[60, 80], [200, 180], [320, 60], [130, 300], [270, 420]];
-    cloudSeed.forEach(([cx, cyBase]) => {
-      // Смещаем облака на 30% от скролла камеры
-      const cy = ((cyBase - s.cameraY * 0.3) % (CANVAS_H + 100) + (CANVAS_H + 100)) % (CANVAS_H + 100) - 50;
+    // Облака
+    ctx.fillStyle = "rgba(255,255,255,0.72)";
+    [[55,80],[190,160],[320,55],[120,290],[265,410]].forEach(([cx, cyB]) => {
+      const cy = ((cyB - s.cameraY * 0.28) % (CANVAS_H + 120) + (CANVAS_H + 120)) % (CANVAS_H + 120) - 60;
       ctx.beginPath();
-      ctx.arc(cx, cy, 20, 0, Math.PI * 2);
-      ctx.arc(cx + 22, cy - 8, 15, 0, Math.PI * 2);
-      ctx.arc(cx + 40, cy, 18, 0, Math.PI * 2);
+      ctx.arc(cx,cy,20,0,Math.PI*2);
+      ctx.arc(cx+24,cy-9,15,0,Math.PI*2);
+      ctx.arc(cx+44,cy,18,0,Math.PI*2);
       ctx.fill();
     });
 
-    // Платформы — переводим мировые → экранные координаты
+    // Платформы
     s.platforms.forEach(p => {
-      // screenY = мировой Y - cameraY (cameraY = мировая Y верхнего края)
-      const screenY = p.y - s.cameraY;
-      if (screenY < -20 || screenY > CANVAS_H + 10) return;
-
+      const sy = p.y - s.cameraY;
+      if (sy < -24 || sy > CANVAS_H + 12) return;
       ctx.save();
-      ctx.shadowColor = "rgba(0,0,0,0.18)";
-      ctx.shadowBlur = 6;
-      ctx.shadowOffsetY = 3;
+      ctx.shadowColor = "rgba(0,0,0,0.2)"; ctx.shadowBlur = 6; ctx.shadowOffsetY = 3;
+      ctx.fillStyle = p.color;
+      ctx.beginPath(); ctx.roundRect(p.x, sy, p.w, 16, 8); ctx.fill();
+      ctx.shadowBlur = 0;
+      ctx.fillStyle = "rgba(255,255,255,0.38)";
+      ctx.beginPath(); ctx.roundRect(p.x+5, sy+2, p.w-10, 5, 3); ctx.fill();
+      if (p.boost) {
+        ctx.font = "13px serif"; ctx.textAlign = "center";
+        ctx.fillText("⚡", p.x + p.w/2, sy - 4);
+      }
+      ctx.restore();
+    });
+
+    // Враги
+    s.enemies.forEach(e => {
+      const sy = e.y - s.cameraY;
+      if (sy < -40 || sy > CANVAS_H + 10) return;
+      ctx.font = `${e.w}px serif`;
+      ctx.textAlign = "left";
+      ctx.fillText(e.emoji, e.x, sy + e.h * 0.92);
+    });
+
+    // Бонусы
+    s.bonuses.forEach(b => {
+      if (b.collected) return;
+      const sy = b.y - s.cameraY;
+      if (sy < -30 || sy > CANVAS_H + 10) return;
+      // мягкое свечение
+      ctx.save();
+      ctx.shadowColor = BONUS_META[b.kind].color;
+      ctx.shadowBlur = 14;
+      ctx.font = "24px serif";
+      ctx.textAlign = "center";
+      ctx.fillText(BONUS_META[b.kind].emoji, b.x + 14, sy + 22);
+      ctx.restore();
+    });
+
+    // Частицы
+    s.particles.forEach(p => {
+      const alpha = p.life / p.maxLife;
+      ctx.globalAlpha = alpha;
       ctx.fillStyle = p.color;
       ctx.beginPath();
-      ctx.roundRect(p.x, screenY, p.w, 16, 8);
+      ctx.arc(p.x - s.cameraY * 0 + 0, p.y - s.cameraY, p.r * alpha, 0, Math.PI * 2);
       ctx.fill();
-      ctx.shadowBlur = 0;
-      ctx.fillStyle = "rgba(255,255,255,0.4)";
-      ctx.beginPath();
-      ctx.roundRect(p.x + 6, screenY + 2, p.w - 12, 5, 3);
-      ctx.fill();
-      if (p.boost) {
-        ctx.font = "14px serif";
-        ctx.textAlign = "center";
-        ctx.fillText("⚡", p.x + p.w / 2, screenY - 4);
-      }
-      ctx.restore();
     });
+    ctx.globalAlpha = 1;
 
     // Игрок
-    const screenPX = s.playerX;
-    const screenPY = s.playerY - s.cameraY;
-    if (frogImgRef.current) {
-      ctx.save();
-      if (s.facingLeft) {
-        ctx.translate(screenPX + PLAYER_W, screenPY);
-        ctx.scale(-1, 1);
-        ctx.drawImage(frogImgRef.current, 0, 0, PLAYER_W, PLAYER_H);
-      } else {
-        ctx.drawImage(frogImgRef.current, screenPX, screenPY, PLAYER_W, PLAYER_H);
-      }
-      ctx.restore();
-    } else {
-      ctx.font = `${PLAYER_W}px serif`;
-      ctx.textAlign = "center";
-      ctx.fillText("🐸", screenPX + PLAYER_W / 2, screenPY + PLAYER_H);
-    }
+    const pw = s.shrinkTimer > 0 ? PLAYER_W * 0.6 : PLAYER_W;
+    const ph = s.shrinkTimer > 0 ? PLAYER_H * 0.6 : PLAYER_H;
+    const screenPX = s.playerX + (PLAYER_W - pw) / 2;
+    const screenPY = s.playerY - s.cameraY + (PLAYER_H - ph);
+    // Мигание при уроне
+    const visible = s.invincible > 0 ? Math.floor(s.invincible / 4) % 2 === 0 : true;
+    if (visible) drawFrog(ctx, screenPX, screenPY, pw, ph, s.facingLeft, s.shieldTimer > 0);
 
-    // HUD счёт
-    ctx.fillStyle = "rgba(0,0,0,0.2)";
-    ctx.beginPath();
-    ctx.roundRect(10, 10, 130, 38, 12);
-    ctx.fill();
+    // HUD
+    ctx.fillStyle = "rgba(0,0,0,0.22)";
+    ctx.beginPath(); ctx.roundRect(10,10,145,40,12); ctx.fill();
     ctx.fillStyle = "#fff";
-    ctx.font = "bold 16px Nunito, sans-serif";
+    ctx.font = "bold 15px Nunito, sans-serif";
     ctx.textAlign = "left";
-    ctx.fillText(`⭐ ${s.score}`, 22, 34);
+    ctx.fillText(`⭐ ${s.score}  🌟${s.stars}`, 20, 34);
 
-    // Подсказка управления
-    ctx.fillStyle = "rgba(0,0,0,0.15)";
-    ctx.font = "11px Nunito, sans-serif";
-    ctx.textAlign = "center";
-    ctx.fillText("← → или кнопки ниже", CANVAS_W / 2, CANVAS_H - 8);
+    // Иконки активных эффектов
+    let ex = CANVAS_W - 14;
+    const effs: [number, string][] = [
+      [s.shieldTimer,"🛡️"],[s.slowTimer,"🌀"],[s.fastTimer,"🔥"],
+      [s.magnetTimer,"🧲"],[s.shrinkTimer,"🔮"]
+    ];
+    effs.forEach(([t, em]) => {
+      if (t <= 0) return;
+      ctx.font = "20px serif"; ctx.textAlign = "right";
+      ctx.fillText(em, ex, 34);
+      ex -= 28;
+    });
+
+    ctx.fillStyle = "rgba(0,0,0,0.14)";
+    ctx.font = "11px Nunito, sans-serif"; ctx.textAlign = "center";
+    ctx.fillText("← → или кнопки ниже", CANVAS_W/2, CANVAS_H - 8);
   }, []);
 
+  // ── Игровой цикл ───────────────────────────────────────────
   const gameLoop = useCallback(() => {
     const s = gameRef.current;
     if (!s || !s.alive) return;
 
+    // Таймеры эффектов
+    if (s.shieldTimer > 0) s.shieldTimer--;
+    if (s.slowTimer > 0) s.slowTimer--;
+    if (s.fastTimer > 0) s.fastTimer--;
+    if (s.magnetTimer > 0) s.magnetTimer--;
+    if (s.shrinkTimer > 0) s.shrinkTimer--;
+    if (s.invincible > 0) s.invincible--;
+    if (s.hitCooldown > 0) s.hitCooldown--;
+
+    const gravity = s.slowTimer > 0 ? GRAVITY * 0.45 : GRAVITY;
+    const speed   = s.fastTimer > 0 ? 7 : 4.2;
+
     // Управление
-    const speed = 4.5;
-    if (keysRef.current.left) { s.velX = -speed; s.facingLeft = true; }
+    if (keysRef.current.left)  { s.velX = -speed; s.facingLeft = true; }
     else if (keysRef.current.right) { s.velX = speed; s.facingLeft = false; }
     else s.velX *= 0.78;
 
     // Физика
-    s.velY += GRAVITY;
+    s.velY += gravity;
     s.playerX += s.velX;
     s.playerY += s.velY;
 
-    // Горизонтальный wrap
+    // Wrap
     if (s.playerX > CANVAS_W) s.playerX = -PLAYER_W;
     if (s.playerX + PLAYER_W < 0) s.playerX = CANVAS_W;
 
-    // Коллизия с платформами — только при падении вниз
+    // Коллизия с платформами
     if (s.velY > 0) {
       for (const p of s.platforms) {
-        const prevBottom = s.playerY + PLAYER_H - s.velY;
-        const currBottom = s.playerY + PLAYER_H;
-        if (
-          prevBottom <= p.y &&
-          currBottom >= p.y &&
-          s.playerX + PLAYER_W - 6 > p.x &&
-          s.playerX + 6 < p.x + p.w
-        ) {
+        const prevBot = s.playerY + PLAYER_H - s.velY;
+        const currBot = s.playerY + PLAYER_H;
+        if (prevBot <= p.y && currBot >= p.y && s.playerX + PLAYER_W - 6 > p.x && s.playerX + 6 < p.x + p.w) {
           s.playerY = p.y - PLAYER_H;
-          s.velY = p.boost ? BOOST_FORCE : JUMP_FORCE;
+          const jf = p.boost ? BOOST_FORCE : JUMP_FORCE;
+          s.velY = s.slowTimer > 0 ? jf * 0.75 : jf;
+          spawnParticles(s.particles, s.playerX + PLAYER_W/2, p.y, p.boost ? "#FFD700" : "#fff", p.boost ? 12 : 5);
           break;
         }
       }
     }
 
-    // Обновляем камеру: следуем за игроком когда он выше верхней трети
+    // Камера
     const screenPY = s.playerY - s.cameraY;
-    const scrollThreshold = CANVAS_H * 0.38;
-    if (screenPY < scrollThreshold) {
-      s.cameraY -= scrollThreshold - screenPY;
-    }
+    const thresh = CANVAS_H * 0.38;
+    if (screenPY < thresh) s.cameraY -= thresh - screenPY;
 
-    // Обновляем рекордную высоту и счёт
+    // Высота и счёт
     if (s.playerY < s.highestY) {
       s.highestY = s.playerY;
-      s.score = Math.floor((CANVAS_H - s.highestY) / 10);
+      s.score = Math.floor((CANVAS_H - s.highestY) / 8) + s.stars * 50;
     }
 
-    // Генерируем новые платформы выше по мере подъёма
-    while (s.nextPlatY > s.cameraY - 100) {
+    // Генерация платформ + врагов + бонусов
+    while (s.nextPlatY > s.cameraY - 120) {
       s.platforms.push(makePlatform(s.nextPlatY));
-      s.nextPlatY -= PLAT_GAP + Math.random() * 20;
-      // Удаляем платформы далеко внизу
-      const cutoff = s.cameraY + CANVAS_H + 200;
-      s.platforms = s.platforms.filter(p => p.y < cutoff);
+      // Враг раз в ~5 платформ
+      if (Math.random() < 0.20) s.enemies.push(makeEnemy(s.nextPlatY - 30));
+      // Бонус раз в ~4 платформы
+      if (Math.random() < 0.25) s.bonuses.push(makeBonus(s.nextPlatY - 50));
+      s.nextPlatY -= PLAT_GAP + Math.random() * 25;
+    }
+    // Очищаем далёкие объекты
+    const cutoff = s.cameraY + CANVAS_H + 250;
+    s.platforms = s.platforms.filter(p => p.y < cutoff);
+    s.enemies   = s.enemies.filter(e => e.y < cutoff);
+    s.bonuses   = s.bonuses.filter(b => b.y < cutoff);
+
+    // Движение врагов
+    s.enemies.forEach(e => {
+      e.x += e.dir * e.speed;
+      if (e.x < 0) { e.x = 0; e.dir = 1; }
+      if (e.x + e.w > CANVAS_W) { e.x = CANVAS_W - e.w; e.dir = -1; }
+    });
+
+    // Магнит: притягиваем бонусы к игроку
+    if (s.magnetTimer > 0) {
+      s.bonuses.forEach(b => {
+        if (b.collected) return;
+        const dx = (s.playerX + PLAYER_W/2) - (b.x + 14);
+        const dy = (s.playerY + PLAYER_H/2) - (b.y + 14);
+        const dist = Math.sqrt(dx*dx + dy*dy);
+        if (dist < 180) { b.x += dx * 0.07; b.y += dy * 0.07; }
+      });
     }
 
-    // Смерть — лягушонок упал ниже экрана
-    if (s.playerY - s.cameraY > CANVAS_H + 80) {
+    // Коллизия с бонусами
+    s.bonuses.forEach(b => {
+      if (b.collected) return;
+      const px = s.playerX + PLAYER_W/2, py = s.playerY + PLAYER_H/2;
+      const bx = b.x + 14, by = b.y + 14;
+      if (Math.abs(px - bx) < 28 && Math.abs(py - by) < 28) {
+        b.collected = true;
+        spawnParticles(s.particles, bx, by, BONUS_META[b.kind].color, 10);
+        const FPS = 60;
+        switch (b.kind) {
+          case "star":   s.stars++; s.score += 50; break;
+          case "shield": s.shieldTimer = 5 * FPS; break;
+          case "slow":   s.slowTimer = 4 * FPS; break;
+          case "fast":   s.fastTimer = 4 * FPS; break;
+          case "shrink": s.shrinkTimer = 5 * FPS; break;
+          case "magnet": s.magnetTimer = 5 * FPS; break;
+        }
+        flashEffect(BONUS_META[b.kind].label);
+      }
+    });
+
+    // Коллизия с врагами
+    if (s.hitCooldown === 0) {
+      s.enemies.forEach(e => {
+        const sy = e.y - s.cameraY;
+        const esy = e.y;
+        const margin = s.shrinkTimer > 0 ? 10 : 6;
+        if (
+          s.playerX + PLAYER_W - margin > e.x &&
+          s.playerX + margin < e.x + e.w &&
+          s.playerY + PLAYER_H - margin > esy &&
+          s.playerY + margin < esy + e.h
+        ) {
+          if (s.shieldTimer > 0) {
+            // щит поглощает удар
+            s.shieldTimer = 0;
+            spawnParticles(s.particles, s.playerX + PLAYER_W/2, s.playerY + PLAYER_H/2, "#4D96FF", 14);
+            flashEffect("🛡️ Щит сломан!");
+          } else {
+            // штраф 100 очков, мигание
+            s.score = Math.max(0, s.score - 100);
+            s.invincible = 90;
+            s.hitCooldown = 90;
+            spawnParticles(s.particles, s.playerX + PLAYER_W/2, s.playerY + PLAYER_H/2, "#FF6B6B", 12);
+            flashEffect("💥 -100 очков!");
+          }
+        }
+        void sy;
+      });
+    }
+
+    // Частицы
+    s.particles.forEach(p => {
+      p.x += p.vx; p.y += p.vy; p.vy += 0.12; p.life--;
+    });
+    s.particles = s.particles.filter(p => p.life > 0);
+
+    // Смерть
+    if (s.playerY - s.cameraY > CANVAS_H + 100) {
       s.alive = false;
       setGameRunning(false);
       setFinalScore(s.score);
@@ -265,30 +471,29 @@ export default function Index() {
 
     drawGame();
     animRef.current = requestAnimationFrame(gameLoop);
-  }, [drawGame, saveRecord]);
+  }, [drawGame, saveRecord, flashEffect]);
 
   const startGame = useCallback(() => {
     cancelAnimationFrame(animRef.current);
     gameRef.current = initGame();
     setFinalScore(0);
+    setActiveEffect("");
     setGameRunning(true);
     setPage("game");
   }, []);
 
   useEffect(() => {
-    if (gameRunning) {
-      animRef.current = requestAnimationFrame(gameLoop);
-    }
+    if (gameRunning) animRef.current = requestAnimationFrame(gameLoop);
     return () => cancelAnimationFrame(animRef.current);
   }, [gameRunning, gameLoop]);
 
   useEffect(() => {
     const down = (e: KeyboardEvent) => {
-      if (e.key === "ArrowLeft" || e.key === "a") keysRef.current.left = true;
+      if (e.key === "ArrowLeft"  || e.key === "a") keysRef.current.left  = true;
       if (e.key === "ArrowRight" || e.key === "d") keysRef.current.right = true;
     };
     const up = (e: KeyboardEvent) => {
-      if (e.key === "ArrowLeft" || e.key === "a") keysRef.current.left = false;
+      if (e.key === "ArrowLeft"  || e.key === "a") keysRef.current.left  = false;
       if (e.key === "ArrowRight" || e.key === "d") keysRef.current.right = false;
     };
     window.addEventListener("keydown", down);
@@ -298,271 +503,185 @@ export default function Index() {
 
   useEffect(() => {
     if (page !== "game") return;
-    const handleTilt = (e: DeviceOrientationEvent) => {
-      const gamma = e.gamma || 0;
-      keysRef.current.left = gamma < -8;
-      keysRef.current.right = gamma > 8;
+    const tilt = (e: DeviceOrientationEvent) => {
+      const g = e.gamma || 0;
+      keysRef.current.left  = g < -8;
+      keysRef.current.right = g > 8;
     };
-    window.addEventListener("deviceorientation", handleTilt);
-    return () => window.removeEventListener("deviceorientation", handleTilt);
+    window.addEventListener("deviceorientation", tilt);
+    return () => window.removeEventListener("deviceorientation", tilt);
   }, [page]);
 
-  const touchLeft = (val: boolean) => { keysRef.current.left = val; };
-  const touchRight = (val: boolean) => { keysRef.current.right = val; };
+  const tL = (v: boolean) => { keysRef.current.left  = v; };
+  const tR = (v: boolean) => { keysRef.current.right = v; };
+  const navLabel = (p: Page) => p === "home" ? "🏠 Главная" : p === "rules" ? "📖 Правила" : "🏆 Рекорды";
+  const goPage = (p: Page) => { cancelAnimationFrame(animRef.current); setGameRunning(false); setPage(p); };
 
-  const navLabel = (p: Page) =>
-    p === "home" ? "🏠 Главная" : p === "rules" ? "📖 Правила" : "🏆 Рекорды";
-
+  // ── JSX ────────────────────────────────────────────────────
   return (
     <div className="min-h-screen flex flex-col items-center" style={{ background: "var(--bg-main)", fontFamily: "'Nunito', sans-serif", color: "var(--color-text)" }}>
 
+      {/* NAV */}
       <nav className="w-full flex items-center justify-between px-5 py-3 shadow-md sticky top-0 z-50" style={{ background: "var(--nav-bg)" }}>
-        <span
-          className="text-xl cursor-pointer select-none"
-          style={{ fontFamily: "'Pacifico', cursive", color: "var(--color-accent)" }}
-          onClick={() => { cancelAnimationFrame(animRef.current); setGameRunning(false); setPage("home"); }}
-        >
+        <span className="text-xl cursor-pointer select-none" style={{ fontFamily: "'Pacifico', cursive", color: "var(--color-accent)" }} onClick={() => goPage("home")}>
           🐸 ПрыгУн!
         </span>
         <div className="flex gap-1">
-          {(["home", "rules", "leaderboard"] as Page[]).map(p => (
-            <button
-              key={p}
-              onClick={() => { cancelAnimationFrame(animRef.current); setGameRunning(false); setPage(p); }}
+          {(["home","rules","leaderboard"] as Page[]).map(p => (
+            <button key={p} onClick={() => goPage(p)}
               className="px-3 py-1 rounded-xl text-sm font-bold transition-all"
-              style={{
-                background: page === p ? "var(--color-accent)" : "var(--btn-secondary)",
-                color: page === p ? "#fff" : "var(--color-text)",
-              }}
-            >
+              style={{ background: page === p ? "var(--color-accent)" : "var(--btn-secondary)", color: page === p ? "#fff" : "var(--color-text)" }}>
               {navLabel(p)}
             </button>
           ))}
         </div>
       </nav>
 
+      {/* HOME */}
       {page === "home" && (
-        <div className="flex flex-col items-center justify-center flex-1 gap-8 py-12 px-4 text-center w-full">
+        <div className="flex flex-col items-center flex-1 gap-7 py-10 px-4 text-center w-full">
           <div className="animate-bounce-in">
-            <h1
-              className="text-6xl md:text-7xl mb-2"
-              style={{
-                fontFamily: "'Pacifico', cursive",
-                color: "var(--color-accent)",
-                textShadow: "4px 4px 0 #FF922B, 7px 7px 0 rgba(0,0,0,0.08)"
-              }}
-            >
+            <h1 className="text-6xl md:text-7xl mb-1" style={{ fontFamily: "'Pacifico', cursive", color: "var(--color-accent)", textShadow: "4px 4px 0 #FF922B, 7px 7px 0 rgba(0,0,0,0.08)" }}>
               ПрыгУн!
             </h1>
-            <p className="text-xl font-bold mt-2">Прыгай выше, бей рекорды!</p>
+            <p className="text-xl font-bold mt-1">Прыгай выше, бей рекорды!</p>
           </div>
 
-          <img
-            src={FROG_IMG}
-            alt="Лягушонок"
-            className="w-40 h-40 rounded-3xl shadow-2xl border-4 border-white object-cover"
-            style={{ animation: "float 3s ease-in-out infinite" }}
-          />
+          <div className="text-8xl" style={{ animation: "float 3s ease-in-out infinite" }}>🐸</div>
 
           <div className="flex flex-col gap-3 w-full max-w-xs">
-            <button
-              onClick={startGame}
-              className="text-xl font-black py-4 px-10 rounded-2xl shadow-lg transition-all hover:scale-105 active:scale-95"
-              style={{
-                background: "var(--color-accent)",
-                color: "#fff",
-                boxShadow: "0 6px 0 #c9510c, 0 10px 20px rgba(0,0,0,0.15)"
-              }}
-            >
+            <button onClick={startGame} className="text-xl font-black py-4 px-10 rounded-2xl transition-all hover:scale-105 active:scale-95"
+              style={{ background: "var(--color-accent)", color: "#fff", boxShadow: "0 6px 0 #c9510c,0 10px 20px rgba(0,0,0,0.15)" }}>
               🎮 ИГРАТЬ!
             </button>
-            <button
-              onClick={() => setPage("rules")}
-              className="text-lg font-bold py-3 px-8 rounded-2xl transition-all hover:scale-105"
-              style={{ background: "var(--btn-secondary)", color: "var(--color-text)", boxShadow: "0 4px 0 rgba(0,0,0,0.1)" }}
-            >
+            <button onClick={() => setPage("rules")} className="text-lg font-bold py-3 px-8 rounded-2xl transition-all hover:scale-105"
+              style={{ background: "var(--btn-secondary)", color: "var(--color-text)", boxShadow: "0 4px 0 rgba(0,0,0,0.1)" }}>
               📖 Правила
             </button>
-            <button
-              onClick={() => setPage("leaderboard")}
-              className="text-lg font-bold py-3 px-8 rounded-2xl transition-all hover:scale-105"
-              style={{ background: "#FFD93D", color: "#7a4100", boxShadow: "0 4px 0 #c9a200" }}
-            >
+            <button onClick={() => setPage("leaderboard")} className="text-lg font-bold py-3 px-8 rounded-2xl transition-all hover:scale-105"
+              style={{ background: "#FFD93D", color: "#7a4100", boxShadow: "0 4px 0 #c9a200" }}>
               🏆 Рекорды {records.length > 0 && `· лучший: ${records[0]}`}
             </button>
           </div>
 
-          <div className="grid grid-cols-3 gap-3 w-full max-w-sm">
-            {[
-              ["🟩", "Обычная", "Стандартный прыжок"],
-              ["⚡", "Ускоритель", "Мега-прыжок!"],
-              ["⭐", "Очки", "Лети выше"],
-            ].map(([icon, title, desc]) => (
+          {/* Легенда */}
+          <div className="grid grid-cols-3 gap-2 w-full max-w-sm">
+            {(Object.entries(BONUS_META) as [BonusKind, typeof BONUS_META[BonusKind]][]).map(([, m]) => (
+              <div key={m.emoji} className="rounded-2xl p-2 text-center shadow" style={{ background: "var(--card-bg)" }}>
+                <div className="text-xl">{m.emoji}</div>
+                <div className="text-xs font-bold mt-1 leading-tight opacity-80">{m.label}</div>
+              </div>
+            ))}
+          </div>
+          <div className="grid grid-cols-2 gap-2 w-full max-w-sm">
+            {[["🦀👾🐛🕷️","Враги","Касание = -100 очков"],["🛡️","Щит","Один бесплатный удар"]].map(([icon,title,desc])=>(
               <div key={title} className="rounded-2xl p-3 text-center shadow" style={{ background: "var(--card-bg)" }}>
-                <div className="text-2xl mb-1">{icon}</div>
-                <div className="font-black text-sm" style={{ color: "var(--color-accent)" }}>{title}</div>
-                <div className="text-xs mt-1 opacity-60">{desc}</div>
+                <div className="text-xl">{icon}</div>
+                <div className="text-xs font-black mt-1" style={{ color: "var(--color-accent)" }}>{title}</div>
+                <div className="text-xs opacity-60 mt-0.5">{desc}</div>
               </div>
             ))}
           </div>
         </div>
       )}
 
+      {/* GAME */}
       {page === "game" && (
         <div className="flex flex-col items-center gap-3 py-4 w-full">
-          <div
-            className="relative"
-            style={{
-              borderRadius: 20,
-              overflow: "hidden",
-              boxShadow: "0 8px 40px rgba(0,0,0,0.3), 0 0 0 4px #FFD93D",
-              maxWidth: "100vw",
-            }}
-          >
-            <canvas
-              ref={canvasRef}
-              width={CANVAS_W}
-              height={CANVAS_H}
-              style={{ display: "block", maxWidth: "100vw", maxHeight: "70vh" }}
-            />
+          {/* Флэш эффекта */}
+          {activeEffect && (
+            <div className="fixed top-20 left-1/2 z-50 px-5 py-2 rounded-2xl font-black text-lg text-white pointer-events-none"
+              style={{ transform: "translateX(-50%)", background: "rgba(0,0,0,0.7)", animation: "fade-in-out 1.8s ease forwards" }}>
+              {activeEffect}
+            </div>
+          )}
+
+          <div className="relative" style={{ borderRadius: 20, overflow: "hidden", boxShadow: "0 8px 40px rgba(0,0,0,0.3),0 0 0 4px #FFD93D", maxWidth: "100vw" }}>
+            <canvas ref={canvasRef} width={CANVAS_W} height={CANVAS_H} style={{ display: "block", maxWidth: "100vw", maxHeight: "70vh" }} />
 
             {!gameRunning && finalScore > 0 && (
-              <div
-                className="absolute inset-0 flex flex-col items-center justify-center gap-4"
-                style={{ background: "rgba(0,0,0,0.6)", backdropFilter: "blur(4px)" }}
-              >
-                <p className="text-5xl font-black" style={{ fontFamily: "'Pacifico', cursive", color: "#FFD93D" }}>
-                  Упс! 😵
-                </p>
-                <p className="text-white text-2xl font-bold">
-                  Счёт: <span style={{ color: "#FFD93D" }}>{finalScore}</span>
-                </p>
-                {records[0] === finalScore && (
-                  <p className="text-green-300 font-bold text-lg">🎉 Новый рекорд!</p>
-                )}
-                <button
-                  onClick={startGame}
-                  className="mt-2 text-xl font-black py-3 px-10 rounded-2xl"
-                  style={{ background: "var(--color-accent)", color: "#fff", boxShadow: "0 5px 0 #c9510c" }}
-                >
-                  🔄 Ещё раз!
-                </button>
-                <button
-                  onClick={() => { setPage("home"); setFinalScore(0); }}
-                  className="text-base font-bold py-2 px-6 rounded-xl"
-                  style={{ background: "rgba(255,255,255,0.2)", color: "#fff" }}
-                >
-                  🏠 Главная
-                </button>
+              <div className="absolute inset-0 flex flex-col items-center justify-center gap-4"
+                style={{ background: "rgba(0,0,0,0.65)", backdropFilter: "blur(4px)" }}>
+                <p className="text-5xl font-black" style={{ fontFamily: "'Pacifico', cursive", color: "#FFD93D" }}>Упс! 😵</p>
+                <p className="text-white text-2xl font-bold">Счёт: <span style={{ color: "#FFD93D" }}>{finalScore}</span></p>
+                {records[0] === finalScore && <p className="text-green-300 font-bold text-lg">🎉 Новый рекорд!</p>}
+                <button onClick={startGame} className="mt-1 text-xl font-black py-3 px-10 rounded-2xl"
+                  style={{ background: "var(--color-accent)", color: "#fff", boxShadow: "0 5px 0 #c9510c" }}>🔄 Ещё раз!</button>
+                <button onClick={() => { setPage("home"); setFinalScore(0); }} className="text-base font-bold py-2 px-6 rounded-xl"
+                  style={{ background: "rgba(255,255,255,0.2)", color: "#fff" }}>🏠 Главная</button>
               </div>
             )}
           </div>
 
           <div className="flex gap-8 mt-1">
-            <button
-              onPointerDown={() => touchLeft(true)}
-              onPointerUp={() => touchLeft(false)}
-              onPointerLeave={() => touchLeft(false)}
-              className="w-16 h-16 rounded-2xl text-2xl font-black flex items-center justify-center shadow-lg select-none"
-              style={{ background: "var(--color-accent)", color: "#fff", boxShadow: "0 4px 0 #c9510c" }}
-            >
-              ◀
-            </button>
-            <button
-              onPointerDown={() => touchRight(true)}
-              onPointerUp={() => touchRight(false)}
-              onPointerLeave={() => touchRight(false)}
-              className="w-16 h-16 rounded-2xl text-2xl font-black flex items-center justify-center shadow-lg select-none"
-              style={{ background: "var(--color-accent)", color: "#fff", boxShadow: "0 4px 0 #c9510c" }}
-            >
-              ▶
-            </button>
+            {[["◀", tL], ["▶", tR]].map(([label, fn]) => (
+              <button key={label as string}
+                onPointerDown={() => (fn as (v:boolean)=>void)(true)}
+                onPointerUp={() => (fn as (v:boolean)=>void)(false)}
+                onPointerLeave={() => (fn as (v:boolean)=>void)(false)}
+                className="w-16 h-16 rounded-2xl text-2xl font-black flex items-center justify-center shadow-lg select-none"
+                style={{ background: "var(--color-accent)", color: "#fff", boxShadow: "0 4px 0 #c9510c" }}>
+                {label as string}
+              </button>
+            ))}
           </div>
         </div>
       )}
 
+      {/* RULES */}
       {page === "rules" && (
-        <div className="flex flex-col items-center gap-6 py-10 px-4 w-full max-w-lg">
-          <h2 className="text-4xl font-black" style={{ fontFamily: "'Pacifico', cursive", color: "var(--color-accent)" }}>
-            📖 Правила
-          </h2>
-          <div className="w-full flex flex-col gap-4">
+        <div className="flex flex-col items-center gap-5 py-10 px-4 w-full max-w-lg">
+          <h2 className="text-4xl font-black" style={{ fontFamily: "'Pacifico', cursive", color: "var(--color-accent)" }}>📖 Правила</h2>
+          <div className="w-full flex flex-col gap-3">
             {[
-              { icon: "🎯", title: "Цель игры", text: "Прыгай как можно выше по платформам и набирай очки. Чем выше — тем круче рекорд!" },
-              { icon: "🕹️", title: "Управление", text: "Стрелки ← → на клавиатуре или кнопки ◀▶ на экране. На телефоне — наклоняй устройство влево и вправо!" },
-              { icon: "🟩", title: "Обычная платформа", text: "Стандартный прыжок. Лягушонок отпрыгивает на среднюю высоту." },
-              { icon: "⚡", title: "Золотая платформа", text: "Платформа-ускоритель! Лягушонок взлетает в 1.6 раза выше обычного. Ищи их!" },
-              { icon: "💀", title: "Конец игры", text: "Если лягушонок упадёт ниже экрана — игра заканчивается. Не зевай!" },
+              { icon: "🎯", title: "Цель", text: "Прыгай выше по платформам, собирай бонусы, избегай врагов!" },
+              { icon: "🕹️", title: "Управление", text: "Стрелки ← → на клавиатуре, кнопки ◀▶ на экране, или наклон телефона." },
+              { icon: "⚡", title: "Ускоритель", text: "Золотые платформы — мега-прыжок в 1.6× выше!" },
+              { icon: "⭐🛡️🔥🌀🔮🧲", title: "Бонусы", text: "Очки, щит, скорость, лёгкость, уменьшение, магнит." },
+              { icon: "🦀👾🐛🕷️", title: "Враги", text: "Касание = −100 очков и мигание. Щит спасает один раз." },
             ].map(({ icon, title, text }) => (
-              <div key={title} className="flex gap-4 items-start p-4 rounded-2xl shadow" style={{ background: "var(--card-bg)" }}>
-                <span className="text-3xl flex-shrink-0">{icon}</span>
+              <div key={title} className="flex gap-3 items-start p-4 rounded-2xl shadow" style={{ background: "var(--card-bg)" }}>
+                <span className="text-2xl flex-shrink-0">{icon}</span>
                 <div>
-                  <p className="font-black text-base" style={{ color: "var(--color-accent)" }}>{title}</p>
-                  <p className="text-sm mt-1 opacity-80">{text}</p>
+                  <p className="font-black text-sm" style={{ color: "var(--color-accent)" }}>{title}</p>
+                  <p className="text-sm mt-0.5 opacity-80">{text}</p>
                 </div>
               </div>
             ))}
           </div>
-          <button
-            onClick={startGame}
-            className="mt-2 text-xl font-black py-4 px-12 rounded-2xl shadow-lg"
-            style={{ background: "var(--color-accent)", color: "#fff", boxShadow: "0 6px 0 #c9510c" }}
-          >
-            🎮 Начать игру!
-          </button>
+          <button onClick={startGame} className="text-xl font-black py-4 px-12 rounded-2xl"
+            style={{ background: "var(--color-accent)", color: "#fff", boxShadow: "0 6px 0 #c9510c" }}>🎮 Начать!</button>
         </div>
       )}
 
+      {/* LEADERBOARD */}
       {page === "leaderboard" && (
         <div className="flex flex-col items-center gap-6 py-10 px-4 w-full max-w-lg">
-          <h2 className="text-4xl font-black" style={{ fontFamily: "'Pacifico', cursive", color: "var(--color-accent)" }}>
-            🏆 Рекорды
-          </h2>
+          <h2 className="text-4xl font-black" style={{ fontFamily: "'Pacifico', cursive", color: "var(--color-accent)" }}>🏆 Рекорды</h2>
           {records.length === 0 ? (
             <div className="text-center py-12">
               <p className="text-6xl mb-4">🎮</p>
               <p className="text-xl font-bold opacity-60">Ещё нет рекордов!</p>
-              <p className="text-sm mt-2 opacity-40">Сыграй первую игру</p>
             </div>
           ) : (
             <div className="w-full flex flex-col gap-3">
               {records.map((score, i) => (
-                <div
-                  key={i}
-                  className="flex items-center gap-4 px-5 py-3 rounded-2xl shadow"
-                  style={{
-                    background: i === 0 ? "linear-gradient(135deg, #FFD93D, #FF922B)" : "var(--card-bg)",
-                    transform: i === 0 ? "scale(1.03)" : "scale(1)",
-                    transition: "transform 0.2s",
-                  }}
-                >
-                  <span className="text-3xl w-10 text-center">
-                    {i === 0 ? "🥇" : i === 1 ? "🥈" : i === 2 ? "🥉" : `${i + 1}.`}
-                  </span>
-                  <span className="font-black text-xl flex-1" style={{ color: i === 0 ? "#7a3000" : "var(--color-accent)" }}>
-                    {score} очков
-                  </span>
-                  {i === 0 && <span className="text-sm font-bold" style={{ color: "#7a3000" }}>Лучший!</span>}
+                <div key={i} className="flex items-center gap-4 px-5 py-3 rounded-2xl shadow"
+                  style={{ background: i===0 ? "linear-gradient(135deg,#FFD93D,#FF922B)" : "var(--card-bg)", transform: i===0 ? "scale(1.03)" : "scale(1)" }}>
+                  <span className="text-3xl w-10 text-center">{i===0?"🥇":i===1?"🥈":i===2?"🥉":`${i+1}.`}</span>
+                  <span className="font-black text-xl flex-1" style={{ color: i===0?"#7a3000":"var(--color-accent)" }}>{score} очков</span>
+                  {i===0 && <span className="text-sm font-bold" style={{ color:"#7a3000" }}>Лучший!</span>}
                 </div>
               ))}
             </div>
           )}
           <div className="flex gap-3 flex-wrap justify-center">
-            <button
-              onClick={startGame}
-              className="text-xl font-black py-3 px-10 rounded-2xl shadow-lg"
-              style={{ background: "var(--color-accent)", color: "#fff", boxShadow: "0 5px 0 #c9510c" }}
-            >
-              🎮 Играть!
-            </button>
+            <button onClick={startGame} className="text-xl font-black py-3 px-10 rounded-2xl"
+              style={{ background: "var(--color-accent)", color: "#fff", boxShadow: "0 5px 0 #c9510c" }}>🎮 Играть!</button>
             {records.length > 0 && (
-              <button
-                onClick={() => { setRecords([]); localStorage.removeItem("jumpRecords"); }}
+              <button onClick={() => { setRecords([]); localStorage.removeItem("jumpRecords"); }}
                 className="text-base font-bold py-3 px-6 rounded-2xl"
-                style={{ background: "#FF6B6B", color: "#fff", boxShadow: "0 4px 0 #c0392b" }}
-              >
-                🗑️ Сбросить
-              </button>
+                style={{ background: "#FF6B6B", color: "#fff", boxShadow: "0 4px 0 #c0392b" }}>🗑️ Сбросить</button>
             )}
           </div>
         </div>
