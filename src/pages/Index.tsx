@@ -3,12 +3,12 @@ import { useState, useEffect, useRef, useCallback } from "react";
 // ─── Константы ───────────────────────────────────────────────
 const CANVAS_W = 400;
 const CANVAS_H = 560;
-const GRAVITY = 0.35;
-const JUMP_FORCE = -8.5;       // замедленный прыжок
-const BOOST_FORCE = -14;
+const GRAVITY = 0.22;
+const JUMP_FORCE = -9.5;
+const BOOST_FORCE = -15.5;
 const PLAYER_W = 40;
 const PLAYER_H = 40;
-const PLAT_GAP = 85;
+const PLAT_GAP = 80;
 
 // ─── Типы ────────────────────────────────────────────────────
 interface Platform {
@@ -76,11 +76,11 @@ const ENEMY_EMOJIS = ["🦀","👾","🐛","🕷️"];
 
 // ─── Вспомогательные ─────────────────────────────────────────
 function makePlatform(y: number, forceNormal = false): Platform {
-  const boost = !forceNormal && Math.random() < 0.2;
+  const boost = !forceNormal && Math.random() < 0.22;
   return {
-    x: Math.random() * (CANVAS_W - 90) + 5,
+    x: Math.random() * (CANVAS_W - 100) + 5,
     y,
-    w: boost ? 55 : 70 + Math.random() * 50,
+    w: boost ? 65 : 90 + Math.random() * 55,  // шире
     boost,
     color: boost ? BOOST_COLOR : PLAT_COLORS[Math.floor(Math.random() * PLAT_COLORS.length)],
   };
@@ -92,7 +92,7 @@ function makeEnemy(y: number): Enemy {
     y,
     w: 36, h: 28,
     dir: Math.random() < 0.5 ? 1 : -1,
-    speed: 1 + Math.random() * 1.5,
+    speed: 0.6 + Math.random() * 0.9,  // медленнее
     emoji: ENEMY_EMOJIS[Math.floor(Math.random() * ENEMY_EMOJIS.length)],
   };
 }
@@ -374,11 +374,11 @@ export default function Index() {
     // Генерация платформ + врагов + бонусов
     while (s.nextPlatY > s.cameraY - 120) {
       s.platforms.push(makePlatform(s.nextPlatY));
-      // Враг раз в ~5 платформ
-      if (Math.random() < 0.20) s.enemies.push(makeEnemy(s.nextPlatY - 30));
-      // Бонус раз в ~4 платформы
-      if (Math.random() < 0.25) s.bonuses.push(makeBonus(s.nextPlatY - 50));
-      s.nextPlatY -= PLAT_GAP + Math.random() * 25;
+      // Враг раз в ~9 платформ (реже)
+      if (Math.random() < 0.11) s.enemies.push(makeEnemy(s.nextPlatY - 30));
+      // Бонус раз в ~3 платформы (чаще)
+      if (Math.random() < 0.33) s.bonuses.push(makeBonus(s.nextPlatY - 50));
+      s.nextPlatY -= PLAT_GAP + Math.random() * 15;
     }
     // Очищаем далёкие объекты
     const cutoff = s.cameraY + CANVAS_H + 250;
