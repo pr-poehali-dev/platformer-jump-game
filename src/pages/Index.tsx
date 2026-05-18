@@ -4,54 +4,65 @@ const FROG_IMG = "https://cdn.poehali.dev/projects/673a75ca-1f06-45ec-8ca9-0d98d
 
 const CANVAS_W = 400;
 const CANVAS_H = 560;
-const GRAVITY = 0.4;
-const JUMP_FORCE = -10;
-const BOOST_FORCE = -17;
-const PLATFORM_COUNT = 7;
+const GRAVITY = 0.45;
+const JUMP_FORCE = -11;
+const BOOST_FORCE = -18;
 const PLAYER_W = 44;
 const PLAYER_H = 44;
+// Дистанция между платформами по Y (в мировых координатах)
+const PLAT_GAP = 80;
+const PLAT_POOL = 20; // сколько платформ держим в памяти
 
 interface Platform {
   x: number;
-  y: number;
+  y: number; // мировые координаты (растут вверх: меньше = выше)
   w: number;
   boost: boolean;
   color: string;
 }
 
 interface GameState {
+  // Позиция игрока в мировых координатах (Y растёт вниз, 0 = верхняя точка мира)
   playerX: number;
   playerY: number;
   velY: number;
   velX: number;
   platforms: Platform[];
   score: number;
+  // cameraY = мировая Y-координата верхнего края экрана
   cameraY: number;
   alive: boolean;
   facingLeft: boolean;
+  highestY: number; // наивысшая Y-координата игрока (минимальная = самая высокая)
+  nextPlatY: number; // Y следующей платформы для генерации
 }
 
 const PLATFORM_COLORS = ["#FF6B6B", "#FFD93D", "#6BCB77", "#4D96FF", "#FF6FD8", "#FF922B"];
 const BOOST_COLOR = "#FFD700";
 
-function generatePlatforms(startY: number, count: number): Platform[] {
-  const platforms: Platform[] = [];
-  for (let i = 0; i < count; i++) {
-    const boost = Math.random() < 0.25;
-    platforms.push({
-      x: Math.random() * (CANVAS_W - 80),
-      y: startY - i * 85 - Math.random() * 30,
-      w: boost ? 60 : 80 + Math.random() * 40,
-      boost,
-      color: boost ? BOOST_COLOR : PLATFORM_COLORS[Math.floor(Math.random() * PLATFORM_COLORS.length)],
-    });
-  }
-  return platforms;
+function makePlatform(y: number, forceNormal = false): Platform {
+  const boost = !forceNormal && Math.random() < 0.22;
+  return {
+    x: Math.random() * (CANVAS_W - 90) + 5,
+    y,
+    w: boost ? 58 : 75 + Math.random() * 45,
+    boost,
+    color: boost ? BOOST_COLOR : PLATFORM_COLORS[Math.floor(Math.random() * PLATFORM_COLORS.length)],
+  };
 }
 
 function initGame(): GameState {
-  const platforms = generatePlatforms(CANVAS_H - 60, PLATFORM_COUNT);
+  // Стартовые платформы: снизу вверх
+  const platforms: Platform[] = [];
+  for (let i = 0; i < PLAT_POOL; i++) {
+    const y = CANVAS_H - 60 - i * PLAT_GAP;
+    platforms.push(makePlatform(y, i === 0));
+  }
+  // Гарантируем стартовую платформу по центру под лягушонком
   platforms[0] = { x: CANVAS_W / 2 - 50, y: CANVAS_H - 60, w: 100, boost: false, color: "#6BCB77" };
+
+  const topPlatY = Math.min(...platforms.map(p => p.y));
+
   return {
     playerX: CANVAS_W / 2 - PLAYER_W / 2,
     playerY: CANVAS_H - 60 - PLAYER_H,
@@ -59,9 +70,11 @@ function initGame(): GameState {
     velX: 0,
     platforms,
     score: 0,
-    cameraY: 0,
+    cameraY: 0, // верхний край экрана = мировая Y=0
     alive: true,
     facingLeft: false,
+    highestY: CANVAS_H - 60 - PLAYER_H,
+    nextPlatY: topPlatY - PLAT_GAP,
   };
 }
 
@@ -97,140 +110,157 @@ export default function Index() {
   const drawGame = useCallback(() => {
     const canvas = canvasRef.current;
     const ctx = canvas?.getContext("2d");
-    const state = gameRef.current;
-    if (!ctx || !state) return;
+    const s = gameRef.current;
+    if (!ctx || !s) return;
 
+    // Фон — небо
     const skyGrad = ctx.createLinearGradient(0, 0, 0, CANVAS_H);
-    skyGrad.addColorStop(0, "#87CEEB");
-    skyGrad.addColorStop(1, "#E0F7FF");
+    skyGrad.addColorStop(0, "#5BBFE8");
+    skyGrad.addColorStop(1, "#D0EEFF");
     ctx.fillStyle = skyGrad;
     ctx.fillRect(0, 0, CANVAS_W, CANVAS_H);
 
-    ctx.fillStyle = "rgba(255,255,255,0.7)";
-    [[60, 80], [200, 40], [320, 120], [130, 200], [280, 280]].forEach(([cx, cy]) => {
-      const cloudY = ((cy - state.cameraY * 0.3) % CANVAS_H + CANVAS_H) % CANVAS_H;
+    // Облака (параллакс — движутся медленнее)
+    ctx.fillStyle = "rgba(255,255,255,0.75)";
+    const cloudSeed = [[60, 80], [200, 180], [320, 60], [130, 300], [270, 420]];
+    cloudSeed.forEach(([cx, cyBase]) => {
+      // Смещаем облака на 30% от скролла камеры
+      const cy = ((cyBase - s.cameraY * 0.3) % (CANVAS_H + 100) + (CANVAS_H + 100)) % (CANVAS_H + 100) - 50;
       ctx.beginPath();
-      ctx.arc(cx, cloudY, 22, 0, Math.PI * 2);
-      ctx.arc(cx + 22, cloudY - 8, 16, 0, Math.PI * 2);
-      ctx.arc(cx + 40, cloudY, 18, 0, Math.PI * 2);
+      ctx.arc(cx, cy, 20, 0, Math.PI * 2);
+      ctx.arc(cx + 22, cy - 8, 15, 0, Math.PI * 2);
+      ctx.arc(cx + 40, cy, 18, 0, Math.PI * 2);
       ctx.fill();
     });
 
-    const offsetY = -state.cameraY;
+    // Платформы — переводим мировые → экранные координаты
+    s.platforms.forEach(p => {
+      // screenY = мировой Y - cameraY (cameraY = мировая Y верхнего края)
+      const screenY = p.y - s.cameraY;
+      if (screenY < -20 || screenY > CANVAS_H + 10) return;
 
-    state.platforms.forEach(p => {
-      const py = p.y + offsetY;
-      if (py < -30 || py > CANVAS_H + 10) return;
       ctx.save();
-      ctx.shadowColor = "rgba(0,0,0,0.15)";
+      ctx.shadowColor = "rgba(0,0,0,0.18)";
       ctx.shadowBlur = 6;
       ctx.shadowOffsetY = 3;
       ctx.fillStyle = p.color;
       ctx.beginPath();
-      ctx.roundRect(p.x, py, p.w, 16, 8);
+      ctx.roundRect(p.x, screenY, p.w, 16, 8);
       ctx.fill();
       ctx.shadowBlur = 0;
-      ctx.fillStyle = "rgba(255,255,255,0.35)";
+      ctx.fillStyle = "rgba(255,255,255,0.4)";
       ctx.beginPath();
-      ctx.roundRect(p.x + 6, py + 2, p.w - 12, 5, 4);
+      ctx.roundRect(p.x + 6, screenY + 2, p.w - 12, 5, 3);
       ctx.fill();
       if (p.boost) {
-        ctx.fillStyle = "#FF6B00";
-        ctx.font = "bold 14px Nunito, sans-serif";
+        ctx.font = "14px serif";
         ctx.textAlign = "center";
-        ctx.fillText("⚡", p.x + p.w / 2, py - 4);
+        ctx.fillText("⚡", p.x + p.w / 2, screenY - 4);
       }
       ctx.restore();
     });
 
-    const px = state.playerX;
-    const py = state.playerY + offsetY;
+    // Игрок
+    const screenPX = s.playerX;
+    const screenPY = s.playerY - s.cameraY;
     if (frogImgRef.current) {
       ctx.save();
-      if (state.facingLeft) {
-        ctx.translate(px + PLAYER_W, py);
+      if (s.facingLeft) {
+        ctx.translate(screenPX + PLAYER_W, screenPY);
         ctx.scale(-1, 1);
         ctx.drawImage(frogImgRef.current, 0, 0, PLAYER_W, PLAYER_H);
       } else {
-        ctx.drawImage(frogImgRef.current, px, py, PLAYER_W, PLAYER_H);
+        ctx.drawImage(frogImgRef.current, screenPX, screenPY, PLAYER_W, PLAYER_H);
       }
       ctx.restore();
     } else {
       ctx.font = `${PLAYER_W}px serif`;
       ctx.textAlign = "center";
-      ctx.fillText("🐸", px + PLAYER_W / 2, py + PLAYER_H);
+      ctx.fillText("🐸", screenPX + PLAYER_W / 2, screenPY + PLAYER_H);
     }
 
-    ctx.fillStyle = "rgba(0,0,0,0.18)";
+    // HUD счёт
+    ctx.fillStyle = "rgba(0,0,0,0.2)";
     ctx.beginPath();
     ctx.roundRect(10, 10, 130, 38, 12);
     ctx.fill();
     ctx.fillStyle = "#fff";
     ctx.font = "bold 16px Nunito, sans-serif";
     ctx.textAlign = "left";
-    ctx.fillText(`⭐ ${state.score}`, 22, 34);
+    ctx.fillText(`⭐ ${s.score}`, 22, 34);
 
-    ctx.fillStyle = "rgba(0,0,0,0.13)";
-    ctx.font = "12px Nunito, sans-serif";
+    // Подсказка управления
+    ctx.fillStyle = "rgba(0,0,0,0.15)";
+    ctx.font = "11px Nunito, sans-serif";
     ctx.textAlign = "center";
-    ctx.fillText("← → или наклон телефона", CANVAS_W / 2, CANVAS_H - 8);
+    ctx.fillText("← → или кнопки ниже", CANVAS_W / 2, CANVAS_H - 8);
   }, []);
 
   const gameLoop = useCallback(() => {
-    const state = gameRef.current;
-    if (!state || !state.alive) return;
+    const s = gameRef.current;
+    if (!s || !s.alive) return;
 
-    const speed = 4;
-    if (keysRef.current.left) { state.velX = -speed; state.facingLeft = true; }
-    else if (keysRef.current.right) { state.velX = speed; state.facingLeft = false; }
-    else state.velX *= 0.8;
+    // Управление
+    const speed = 4.5;
+    if (keysRef.current.left) { s.velX = -speed; s.facingLeft = true; }
+    else if (keysRef.current.right) { s.velX = speed; s.facingLeft = false; }
+    else s.velX *= 0.78;
 
-    state.velY += GRAVITY;
-    state.playerX += state.velX;
-    state.playerY += state.velY;
+    // Физика
+    s.velY += GRAVITY;
+    s.playerX += s.velX;
+    s.playerY += s.velY;
 
-    if (state.playerX > CANVAS_W) state.playerX = -PLAYER_W;
-    if (state.playerX + PLAYER_W < 0) state.playerX = CANVAS_W;
+    // Горизонтальный wrap
+    if (s.playerX > CANVAS_W) s.playerX = -PLAYER_W;
+    if (s.playerX + PLAYER_W < 0) s.playerX = CANVAS_W;
 
-    if (state.velY > 0) {
-      state.platforms.forEach(p => {
-        const relY = state.playerY + PLAYER_H - p.y;
+    // Коллизия с платформами — только при падении вниз
+    if (s.velY > 0) {
+      for (const p of s.platforms) {
+        const prevBottom = s.playerY + PLAYER_H - s.velY;
+        const currBottom = s.playerY + PLAYER_H;
         if (
-          relY >= 0 && relY <= 14 &&
-          state.playerX + PLAYER_W > p.x + 4 &&
-          state.playerX < p.x + p.w - 4
+          prevBottom <= p.y &&
+          currBottom >= p.y &&
+          s.playerX + PLAYER_W - 6 > p.x &&
+          s.playerX + 6 < p.x + p.w
         ) {
-          state.velY = p.boost ? BOOST_FORCE : JUMP_FORCE;
+          s.playerY = p.y - PLAYER_H;
+          s.velY = p.boost ? BOOST_FORCE : JUMP_FORCE;
+          break;
         }
-      });
+      }
     }
 
-    const threshold = CANVAS_H * 0.4;
-    if (state.playerY + state.cameraY < threshold) {
-      const diff = threshold - (state.playerY + state.cameraY);
-      state.cameraY += diff;
-      state.score = Math.max(state.score, Math.floor(state.cameraY / 10));
-
-      state.platforms.forEach((p, i) => {
-        if (p.y + state.cameraY > CANVAS_H + 50) {
-          const topY = Math.min(...state.platforms.map(p2 => p2.y));
-          const boost = Math.random() < 0.25;
-          state.platforms[i] = {
-            x: Math.random() * (CANVAS_W - 80),
-            y: topY - 80 - Math.random() * 30,
-            w: boost ? 60 : 80 + Math.random() * 40,
-            boost,
-            color: boost ? BOOST_COLOR : PLATFORM_COLORS[Math.floor(Math.random() * PLATFORM_COLORS.length)],
-          };
-        }
-      });
+    // Обновляем камеру: следуем за игроком когда он выше верхней трети
+    const screenPY = s.playerY - s.cameraY;
+    const scrollThreshold = CANVAS_H * 0.38;
+    if (screenPY < scrollThreshold) {
+      s.cameraY -= scrollThreshold - screenPY;
     }
 
-    if (state.playerY + state.cameraY > CANVAS_H + 100) {
-      state.alive = false;
+    // Обновляем рекордную высоту и счёт
+    if (s.playerY < s.highestY) {
+      s.highestY = s.playerY;
+      s.score = Math.floor((CANVAS_H - s.highestY) / 10);
+    }
+
+    // Генерируем новые платформы выше по мере подъёма
+    while (s.nextPlatY > s.cameraY - 100) {
+      s.platforms.push(makePlatform(s.nextPlatY));
+      s.nextPlatY -= PLAT_GAP + Math.random() * 20;
+      // Удаляем платформы далеко внизу
+      const cutoff = s.cameraY + CANVAS_H + 200;
+      s.platforms = s.platforms.filter(p => p.y < cutoff);
+    }
+
+    // Смерть — лягушонок упал ниже экрана
+    if (s.playerY - s.cameraY > CANVAS_H + 80) {
+      s.alive = false;
       setGameRunning(false);
-      setFinalScore(state.score);
-      saveRecord(state.score);
+      setFinalScore(s.score);
+      saveRecord(s.score);
     }
 
     drawGame();
@@ -280,7 +310,8 @@ export default function Index() {
   const touchLeft = (val: boolean) => { keysRef.current.left = val; };
   const touchRight = (val: boolean) => { keysRef.current.right = val; };
 
-  const navLabel = (p: Page) => p === "home" ? "🏠 Главная" : p === "rules" ? "📖 Правила" : "🏆 Рекорды";
+  const navLabel = (p: Page) =>
+    p === "home" ? "🏠 Главная" : p === "rules" ? "📖 Правила" : "🏆 Рекорды";
 
   return (
     <div className="min-h-screen flex flex-col items-center" style={{ background: "var(--bg-main)", fontFamily: "'Nunito', sans-serif", color: "var(--color-text)" }}>
@@ -312,7 +343,7 @@ export default function Index() {
 
       {page === "home" && (
         <div className="flex flex-col items-center justify-center flex-1 gap-8 py-12 px-4 text-center w-full">
-          <div>
+          <div className="animate-bounce-in">
             <h1
               className="text-6xl md:text-7xl mb-2"
               style={{
@@ -460,7 +491,7 @@ export default function Index() {
               { icon: "🎯", title: "Цель игры", text: "Прыгай как можно выше по платформам и набирай очки. Чем выше — тем круче рекорд!" },
               { icon: "🕹️", title: "Управление", text: "Стрелки ← → на клавиатуре или кнопки ◀▶ на экране. На телефоне — наклоняй устройство влево и вправо!" },
               { icon: "🟩", title: "Обычная платформа", text: "Стандартный прыжок. Лягушонок отпрыгивает на среднюю высоту." },
-              { icon: "⚡", title: "Золотая платформа", text: "Платформа-ускоритель! Лягушонок взлетает в 1.7 раза выше обычного. Ищи их!" },
+              { icon: "⚡", title: "Золотая платформа", text: "Платформа-ускоритель! Лягушонок взлетает в 1.6 раза выше обычного. Ищи их!" },
               { icon: "💀", title: "Конец игры", text: "Если лягушонок упадёт ниже экрана — игра заканчивается. Не зевай!" },
             ].map(({ icon, title, text }) => (
               <div key={title} className="flex gap-4 items-start p-4 rounded-2xl shadow" style={{ background: "var(--card-bg)" }}>
