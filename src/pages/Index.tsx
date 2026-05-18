@@ -35,6 +35,12 @@ interface Particle {
   life: number; maxLife: number; color: string; r: number;
 }
 
+interface FloatText {
+  x: number; y: number; // мировые координаты
+  text: string; color: string;
+  life: number; maxLife: number;
+}
+
 interface GameState {
   playerX: number; playerY: number;
   velY: number; velX: number;
@@ -42,6 +48,7 @@ interface GameState {
   enemies: Enemy[];
   bonuses: Bonus[];
   particles: Particle[];
+  floatTexts: FloatText[];
   score: number;
   cameraY: number;
   alive: boolean;
@@ -130,7 +137,7 @@ function initGame(): GameState {
     playerX: CANVAS_W / 2 - PLAYER_W / 2,
     playerY: CANVAS_H - 60 - PLAYER_H,
     velY: 0, velX: 0,
-    platforms, enemies: [], bonuses: [], particles: [],
+    platforms, enemies: [], bonuses: [], particles: [], floatTexts: [],
     score: 0, cameraY: 0,
     alive: true, facingLeft: false,
     highestY: CANVAS_H - 60 - PLAYER_H,
@@ -274,10 +281,29 @@ export default function Index() {
       ctx.globalAlpha = alpha;
       ctx.fillStyle = p.color;
       ctx.beginPath();
-      ctx.arc(p.x - s.cameraY * 0 + 0, p.y - s.cameraY, p.r * alpha, 0, Math.PI * 2);
+      ctx.arc(p.x, p.y - s.cameraY, p.r * alpha, 0, Math.PI * 2);
       ctx.fill();
     });
     ctx.globalAlpha = 1;
+
+    // Всплывающие тексты (+100, -100 и т.д.)
+    s.floatTexts.forEach(ft => {
+      const alpha = ft.life / ft.maxLife;
+      const sy = ft.y - s.cameraY;
+      const scale = 0.8 + 0.4 * (1 - alpha); // чуть растёт при исчезновении
+      ctx.save();
+      ctx.globalAlpha = alpha;
+      ctx.translate(ft.x, sy);
+      ctx.scale(scale, scale);
+      ctx.font = "bold 22px Nunito, sans-serif";
+      ctx.textAlign = "center";
+      ctx.strokeStyle = "rgba(0,0,0,0.4)";
+      ctx.lineWidth = 3;
+      ctx.strokeText(ft.text, 0, 0);
+      ctx.fillStyle = ft.color;
+      ctx.fillText(ft.text, 0, 0);
+      ctx.restore();
+    });
 
     // Игрок
     const pw = s.shrinkTimer > 0 ? PLAYER_W * 0.6 : PLAYER_W;
@@ -437,9 +463,17 @@ export default function Index() {
       if (stompedFromAbove) {
         // Убиваем врага
         spawnParticles(s.particles, e.x + e.w/2, e.y, "#FFD93D", 14);
-        e.y = 99999; // выкидываем за экран (удалим на очистке)
+        // Всплывающий текст над игроком
+        s.floatTexts.push({
+          x: s.playerX + PLAYER_W / 2,
+          y: s.playerY - 10,
+          text: "💀 +100",
+          color: "#FFD93D",
+          life: 55, maxLife: 55,
+        });
+        e.y = 99999;
         s.score += 100;
-        s.velY = JUMP_FORCE * 0.7; // отскок
+        s.velY = JUMP_FORCE * 0.7;
         flashEffect("💀 +100 очков!");
       } else if (s.hitCooldown === 0) {
         if (s.shieldTimer > 0) {
@@ -461,6 +495,13 @@ export default function Index() {
       p.x += p.vx; p.y += p.vy; p.vy += 0.12; p.life--;
     });
     s.particles = s.particles.filter(p => p.life > 0);
+
+    // Всплывающие тексты — двигаем вверх и уменьшаем жизнь
+    s.floatTexts.forEach(ft => {
+      ft.y -= 1.2;
+      ft.life--;
+    });
+    s.floatTexts = s.floatTexts.filter(ft => ft.life > 0);
 
     // Смерть
     if (s.playerY - s.cameraY > CANVAS_H + 100) {
