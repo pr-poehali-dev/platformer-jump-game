@@ -426,34 +426,35 @@ export default function Index() {
     });
 
     // Коллизия с врагами
-    if (s.hitCooldown === 0) {
-      s.enemies.forEach(e => {
-        const sy = e.y - s.cameraY;
-        const esy = e.y;
-        const margin = s.shrinkTimer > 0 ? 10 : 6;
-        if (
-          s.playerX + PLAYER_W - margin > e.x &&
-          s.playerX + margin < e.x + e.w &&
-          s.playerY + PLAYER_H - margin > esy &&
-          s.playerY + margin < esy + e.h
-        ) {
-          if (s.shieldTimer > 0) {
-            // щит поглощает удар
-            s.shieldTimer = 0;
-            spawnParticles(s.particles, s.playerX + PLAYER_W/2, s.playerY + PLAYER_H/2, "#4D96FF", 14);
-            flashEffect("🛡️ Щит сломан!");
-          } else {
-            // штраф 100 очков, мигание
-            s.score = Math.max(0, s.score - 100);
-            s.invincible = 90;
-            s.hitCooldown = 90;
-            spawnParticles(s.particles, s.playerX + PLAYER_W/2, s.playerY + PLAYER_H/2, "#FF6B6B", 12);
-            flashEffect("💥 -100 очков!");
-          }
+    s.enemies.forEach(e => {
+      const margin = s.shrinkTimer > 0 ? 10 : 5;
+      const overlapX = s.playerX + PLAYER_W - margin > e.x && s.playerX + margin < e.x + e.w;
+      const overlapY = s.playerY + PLAYER_H - margin > e.y && s.playerY + margin < e.y + e.h;
+      if (!overlapX || !overlapY) return;
+
+      // Прыжок сверху: игрок летит вниз и его ноги выше середины врага
+      const stompedFromAbove = s.velY > 0 && (s.playerY + PLAYER_H - s.velY) <= e.y + e.h * 0.55;
+      if (stompedFromAbove) {
+        // Убиваем врага
+        spawnParticles(s.particles, e.x + e.w/2, e.y, "#FFD93D", 14);
+        e.y = 99999; // выкидываем за экран (удалим на очистке)
+        s.score += 100;
+        s.velY = JUMP_FORCE * 0.7; // отскок
+        flashEffect("💀 +100 очков!");
+      } else if (s.hitCooldown === 0) {
+        if (s.shieldTimer > 0) {
+          s.shieldTimer = 0;
+          spawnParticles(s.particles, s.playerX + PLAYER_W/2, s.playerY + PLAYER_H/2, "#4D96FF", 14);
+          flashEffect("🛡️ Щит сломан!");
+        } else {
+          s.score = Math.max(0, s.score - 100);
+          s.invincible = 90;
+          s.hitCooldown = 90;
+          spawnParticles(s.particles, s.playerX + PLAYER_W/2, s.playerY + PLAYER_H/2, "#FF6B6B", 12);
+          flashEffect("💥 -100 очков!");
         }
-        void sy;
-      });
-    }
+      }
+    });
 
     // Частицы
     s.particles.forEach(p => {
